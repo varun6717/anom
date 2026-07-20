@@ -508,6 +508,146 @@ def quantile_sweep(history_df, dim='SVC_CD',
     return out
 
 
+def recommend_config(history_df, candidate_dims=None, measure_at='SVC_CD',
+                     min_catch_fold=5, quantiles=(0.999, 0.995, 0.99, 0.98, 0.95),
+                     verbose=True):
+    """
+    Pick the grouping dimension AND the quantile, with a confidence score.
+
+    Chains the diagnostics into one decision so the config is not chosen by
+    eyeballing tables:
+
+      1. gate 1      screen dimensions for real, reproducible heterogeneity
+      2. cross-eval  score every survivor on ONE yardstick (measure_at)
+      3. detectability  reject anything whose blind spot exceeds min_catch_fold
+      4. quantile sweep  pick the loosest quantile that still catches
+                         min_catch_fold everywhere
+
+    CONFIDENCE combines five signals, each 0-1, reported individually so a
+    reviewer can see WHY it is high or low rather than trusting a single number:
+
+      stability   split-half r of the winning dimension's wobble ranking
+      margin      how far the winner beats the runner-up on in-band%
+      separation  how far the winner beats flat (the do-nothing baseline)
+      coverage    share of groups with enough records to calibrate honestly
+      agreement   consistency across partitions (1.0 when only one partition)
+
+    A low score is a signal to review the tables manually, not to abort.
+    """
+    if candidate_dims is None:
+        candidate_dims = [c for c in CANDIDATES if c in history_df.columns]
+
+    gate1 = advise(history_df, verbose=False)
+    cross = cross_evaluate(history_df, measure_at=measure_at,
+                           line_sources=tuple(['flat'] + list(candidate_dims)),
+                           verbose=False)
+    det = {sysname: detectability(history_df[history_df.STRATUS_TANDEM == sysname],
+                                  dim=measure_at, verbose=False).get(sysname)
+           for sysname in cross}
+
+    out = {}
+    for system, table in cross.items():
+        band_col = f'in_band%@{measure_at}'
+        qualified = gate1.get(system, [])
+
+        # candidate rows: capped variants of qualifying dims (capping is the
+        # settled policy — it bounds blind spots at the pooled line)
+        cand = table[table.line_source.str.endswith('_capped')].copy()
+        cand['dim'] = cand.line_source.str.replace('own@', '', regex=False) \
+                                      .str.replace('_capped', '', regex=False)
+        cand = cand[cand['dim'].isin(qualified)] if qualified else cand.iloc[0:0]
+        flat_row = table[table.line_source == 'flat'].iloc[0]
+
+        if cand.empty:
+            out[system] = {'group_dim': None, 'confidence': 0.0,
+                           'reason': 'no dimension passed gate 1; use flat pooling'}
+            if verbose:
+                print(f"\n=== CONFIG RECOMMENDATION — {system} ===")
+                print("    no dimension shows reproducible heterogeneity -> flat pooling")
+            continue
+
+        cand = cand.sort_values(band_col, ascending=False)
+        win = cand.iloc[0]
+        win_dim = win['dim']
+        runner = cand.iloc[1] if len(cand) > 1 else None
+
+        # A dimension must actually BEAT the do-nothing baseline. Passing gate 1
+        # only proves the heterogeneity is real, not that grouping by it helps —
+        # exactly the trap that produced the retracted median-rescale proposal.
+        if win[band_col] <= flat_row[band_col]:
+            out[system] = {
+                'group_dim': None, 'quantile': None, 'confidence': 0.0,
+                'reason': (f"{win_dim} qualified on heterogeneity but scores "
+                           f"{win[band_col]:.0f}% at {measure_at} vs flat's "
+                           f"{flat_row[band_col]:.0f}% — grouping does not help here"),
+            }
+            if verbose:
+                print(f"\n=== CONFIG RECOMMENDATION — {system} ===")
+                print(f"    group_dim = None (flat pooling)")
+                print(f"    {out[system]['reason']}")
+            continue
+
+        # ---- confidence components -------------------------------------
+        d = _diffs(history_df[history_df.STRATUS_TANDEM == system]).sort_values('SUBM_DATE')
+        d['_h'] = d.groupby(LABELS).cumcount() % 2
+        h0 = _bucket_wobble(_diffs(d[d._h == 0]), win_dim, MIN_N // 2)
+        h1 = _bucket_wobble(_diffs(d[d._h == 1]), win_dim, MIN_N // 2)
+        common = h0.index.intersection(h1.index)
+        stability = float(h0.loc[common, 'wobble'].corr(
+            h1.loc[common, 'wobble'], method='spearman')) if len(common) >= 3 else 0.0
+
+        margin = ((win[band_col] - runner[band_col]) / 100
+                  if runner is not None else 0.5)
+        separation = (win[band_col] - flat_row[band_col]) / 100
+        sizes = d.groupby(win_dim).size()
+        coverage = float((sizes >= 100).sum() / max(len(sizes), 1))
+        agreement = 1.0 if len(cross) == 1 else None   # filled in after the loop
+
+        comps = {'stability': max(0.0, min(1.0, stability)),
+                 'margin': max(0.0, min(1.0, margin * 4)),
+                 'separation': max(0.0, min(1.0, separation * 2)),
+                 'coverage': coverage}
+        conf = float(np.mean(list(comps.values())))
+
+        # ---- pick the quantile: loosest that catches min_catch_fold ------
+        sweep = quantile_sweep(history_df[history_df.STRATUS_TANDEM == system],
+                               dim=win_dim, quantiles=quantiles, verbose=False)[system]
+        ok = sweep[sweep['worst_fold'] <= min_catch_fold]
+        chosen_q = float(ok.iloc[0]['quantile']) if len(ok) else float(sweep.iloc[-1]['quantile'])
+        qrow = sweep[sweep['quantile'] == chosen_q].iloc[0]
+
+        out[system] = {
+            'group_dim': win_dim,
+            'quantile': chosen_q,
+            'confidence': round(conf, 2),
+            'components': {k: round(v, 2) for k, v in comps.items()},
+            'alerts_per_day': float(qrow['alerts_per_day']),
+            'worst_fold': float(qrow['worst_fold']),
+            'median_fold': float(qrow['median_fold']),
+            'runner_up': (runner['dim'] if runner is not None else None),
+        }
+
+        if verbose:
+            print(f"\n=== CONFIG RECOMMENDATION — {system} ===")
+            print(f"    group_dim = {win_dim}   quantile = {chosen_q}")
+            print(f"    confidence = {conf:.2f}")
+            for k, v in comps.items():
+                bar = '#' * int(v * 20)
+                print(f"       {k:11s} {v:.2f}  {bar}")
+            print(f"    why: {win_dim} scores {win[band_col]:.0f}% in band at "
+                  f"{measure_at} vs flat's {flat_row[band_col]:.0f}%"
+                  + (f", runner-up {runner['dim']} at {runner[band_col]:.0f}%"
+                     if runner is not None else ""))
+            print(f"    at q={chosen_q}: {qrow['alerts_per_day']} alerts/day, "
+                  f"typical group needs {qrow['median_fold']}x, "
+                  f"worst needs {qrow['worst_fold']}x "
+                  f"(target: catch everything at {min_catch_fold}x)")
+            if conf < 0.6:
+                print(f"    !! confidence below 0.6 — review the Part 1b/1c tables "
+                      f"before shipping this config")
+    return out
+
+
 def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0,
                      window=None, verbose=True):
     """

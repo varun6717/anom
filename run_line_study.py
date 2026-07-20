@@ -203,6 +203,10 @@ def main():
                          '(1.0 = exactly the pooled line; higher = looser cap, '
                          'fewer false alarms on the noisiest group but bigger '
                          'blind spots)')
+    ap.add_argument('--min-catch-fold', type=float, default=5.0, dest='min_catch',
+                    help='the smallest spike the business must never miss. The '
+                         'recommender picks the loosest quantile whose WORST '
+                         'group still catches a move this big (default 5x).')
     ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
     args = ap.parse_args()
 
@@ -222,7 +226,8 @@ def main():
 
         from wobble_advisor import (compare_strategies, cross_evaluate,
                                     detectability, emit_calibration,
-                                    quantile_sweep, recommend, volume_profile)
+                                    quantile_sweep, recommend,
+                                    recommend_config, volume_profile)
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -279,6 +284,19 @@ def main():
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
+
+        print(f"\n{'='*72}\nPART 1f — RECOMMENDED CONFIG (with confidence)\n{'='*72}")
+        print("Chains gates 1 -> cross-eval -> detectability -> quantile sweep into")
+        print("one decision. Confidence is broken into components so you can see WHY")
+        print("it is high or low. A dimension must BEAT flat pooling, not merely")
+        print("qualify on heterogeneity.\n")
+        reco = recommend_config(history, measure_at=args.measure_at,
+                                min_catch_fold=args.min_catch)
+        for system, r in reco.items():
+            if r.get('group_dim'):
+                print(f"\n    to emit this config:")
+                print(f"      python run_line_study.py --start {args.start} --end {args.end} \\")
+                print(f"             --dim {r['group_dim']} --emit-quantile {r['quantile']}")
 
         if args.emit_q:
             import json
