@@ -731,8 +731,25 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
             lines = own.clip(upper=cap)
             thin = sizes.index[sizes < min_records]
             lines.loc[lines.index.intersection(thin)] = cap
+            # Validate the assumption behind that fallback: thin groups get the
+            # ALL-groups pooled line, which is only fair if they behave like the
+            # overall population. They are thin because they bill irregularly, so
+            # it is worth checking rather than assuming.
+            thin_rows = d[d[dim].isin(thin)]
+            if len(thin_rows) >= 100:
+                thin_pool = float(thin_rows['diff'].quantile(quantile))
+                thin_check = {
+                    'thin_groups': int(len(thin)),
+                    'thin_rows': int(len(thin_rows)),
+                    'assigned_fold': round(float(np.exp(cap * sd)), 2),
+                    'own_pool_fold': round(float(np.exp(thin_pool * sd)), 2),
+                    'divergence_pct': round(float((thin_pool - cap) / cap * 100), 1),
+                }
+            else:
+                thin_check = None
 
         cfg['systems'][str(system)] = {
+            'thin_group_check': (thin_check if not flat_only else None),
             'log_mean': float(lg.mean()),
             'log_std': sd,
             'pooled_line_z': pooled,
@@ -771,6 +788,15 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
                   f"min {min(folds)}x, median {float(np.median(folds))}x, "
                   f"max {max(folds)}x")
             print(f"        groups not in history fall back to the cap")
+            tc = cfg['systems'][system].get('thin_group_check')
+            if tc:
+                verdict = ('consistent with the overall pool'
+                           if abs(tc['divergence_pct']) < 20
+                           else 'DIVERGES — thin groups behave differently, consider '
+                                'a thin-specific line')
+                print(f"        thin-group check: {tc['thin_groups']} groups on the "
+                      f"pooled {tc['assigned_fold']}x; their own pool says "
+                      f"{tc['own_pool_fold']}x ({tc['divergence_pct']:+.0f}%) — {verdict}")
     return cfg
 
 
