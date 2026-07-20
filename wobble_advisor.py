@@ -618,6 +618,10 @@ def recommend_config(history_df, candidate_dims=None, measure_at='SVC_CD',
 
         out[system] = {
             'group_dim': win_dim,
+            # study-only provenance: the level at which this choice was VALIDATED.
+            # Not a pipeline parameter — detection is always per permutation, and
+            # group_dim alone decides which line a permutation faces.
+            'validated_at': measure_at,
             'quantile': chosen_q,
             'confidence': round(conf, 2),
             'components': {k: round(v, 2) for k, v in comps.items()},
