@@ -652,6 +652,87 @@ def recommend_config(history_df, candidate_dims=None, measure_at='SVC_CD',
     return out
 
 
+def validate_policy(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0,
+                    min_records=100, min_test=30, verbose=True):
+    """
+    Validate the ACTUAL production policy, segmented by how each line was derived.
+
+    Every other diagnostic scores idealised strategies. This scores the policy as
+    it will really run — own quantile, capped at the pooled line, with thin groups
+    falling back to the pooled line — and breaks the result out by line source:
+
+        own          the group had enough history and earned its own line
+        capped       its own line was too loose; pinned to the pooled line
+        pooled_thin  too little history; using the pooled line
+
+    The thin segment is the one to watch. Roughly half of all fee codes fall
+    there, and they inherit a line derived from the whole population. If they come
+    back systematically noisy or deaf while the `own` segment behaves, the
+    fallback is not serving them and min_records needs revisiting.
+
+    Out-of-sample: lines fitted on alternating days, scored on the held-out half.
+    """
+    out = {}
+    target = (1 - quantile) * 100
+    for system, sdf in history_df.groupby('STRATUS_TANDEM'):
+        d = _diffs(sdf).sort_values('SUBM_DATE')
+        d['_half'] = d.groupby(LABELS).cumcount() % 2
+        fit, test = d[d._half == 0], d[d._half == 1]
+
+        pooled = fit['diff'].quantile(quantile)
+        cap = pooled * cap_multiplier
+        nfit = fit.groupby(dim).size()
+        own = fit.groupby(dim)['diff'].quantile(quantile)
+        lines, source = {}, {}
+        for g in nfit.index:
+            if nfit[g] < min_records:
+                lines[g], source[g] = cap, 'pooled_thin'
+            elif own[g] > cap:
+                lines[g], source[g] = cap, 'capped'
+            else:
+                lines[g], source[g] = own[g], 'own'
+
+        ntest = test.groupby(dim).size()
+        ev = ntest[ntest >= min_test].index
+        rows = []
+        for g in ev:
+            if g not in lines:
+                continue
+            v = test[test[dim] == g]['diff']
+            rows.append({'group': g, 'source': source[g], 'n_test': len(v),
+                         'fa_pct': (v > lines[g]).mean() * 100})
+        if not rows:
+            continue
+        r = pd.DataFrame(rows)
+        r['in_band'] = (r.fa_pct >= target / 2) & (r.fa_pct <= target * 2)
+        r['deaf'] = r.fa_pct == 0
+
+        summary = r.groupby('source').agg(
+            groups=('group', 'size'), in_band_pct=('in_band', lambda x: round(x.mean() * 100)),
+            deaf=('deaf', 'sum'), median_fa=('fa_pct', lambda x: round(x.median(), 2)),
+            worst_fa=('fa_pct', lambda x: round(x.max(), 2))).reset_index()
+        out[system] = summary
+        if verbose:
+            print(f"\n=== POLICY VALIDATION — {system} "
+                  f"(own@{dim} capped, thin<{min_records} -> pooled, out-of-sample) ===")
+            print(f"    target false-alarm {target:.2f}%, band "
+                  f"[{target/2:.2f}%, {target*2:.2f}%], {len(r)} groups scored")
+            print(summary.to_string(index=False))
+            thin = summary[summary.source == 'pooled_thin']
+            oth = summary[summary.source == 'own']
+            if len(thin) and len(oth):
+                gap = int(oth.in_band_pct.iloc[0]) - int(thin.in_band_pct.iloc[0])
+                print(f"    thin groups {int(thin.in_band_pct.iloc[0])}% in band vs "
+                      f"own groups {int(oth.in_band_pct.iloc[0])}%  (gap {gap:+d} pts)")
+                if gap > 20:
+                    print(f"    !! the pooled fallback is serving thin groups notably "
+                          f"worse — consider a thin-specific line or a lower "
+                          f"min_records")
+                else:
+                    print(f"    the pooled fallback serves thin groups comparably")
+    return out
+
+
 def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0,
                      min_records=100, window=None, verbose=True):
     """

@@ -238,7 +238,8 @@ def main():
         from wobble_advisor import (compare_strategies, cross_evaluate,
                                     detectability, emit_calibration,
                                     quantile_sweep, recommend,
-                                    recommend_config, volume_profile)
+                                    recommend_config, validate_policy,
+                                    volume_profile)
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -308,6 +309,16 @@ def main():
                 print(f"\n    to emit this config:")
                 print(f"      python run_line_study.py --start {args.start} --end {args.end} \\")
                 print(f"             --dim {r['group_dim']} --emit-quantile {r['quantile']}")
+
+        print(f"\n{'='*72}\nPART 1g — DOES THE POLICY SERVE THIN GROUPS?\n{'='*72}")
+        print("Every other part scores idealised strategies. This scores the policy")
+        print("as it will actually run, broken out by how each line was derived.")
+        print("About half of all fee codes fall back to the pooled line; this checks")
+        print("whether that fallback actually serves them.\n")
+        _first = next(iter(reco.values())) if reco else {}
+        validate_policy(history, dim=(args.dim_override or _first.get('group_dim') or args.dim),
+                        quantile=(args.emit_q or _first.get('quantile') or args.quantile),
+                        cap_multiplier=args.cap_mult, min_records=args.min_records)
 
         # ---- confirm, then emit ----------------------------------------
         # The study stops here and asks. Everything needed to decide is already
