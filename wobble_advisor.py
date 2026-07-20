@@ -210,6 +210,88 @@ def compare_strategies(history_df, dim='SVC_CD', quantile=0.995,
     return out
 
 
+def cross_evaluate(history_df, measure_at='SVC_CD',
+                   line_sources=('flat', 'SVC_CD', 'ACT_CD', 'MOP_CD'),
+                   quantile=0.995, min_test=100, verbose=True):
+    """
+    THE grouping decision, measured honestly.
+
+    Separates two things that are easy to conflate:
+      - WHERE THE LINE COMES FROM  (line_sources: which dimension's groups
+        supply each permutation's threshold)
+      - WHERE CALIBRATION IS JUDGED (measure_at: the level at which false-alarm
+        rates are computed and scored)
+
+    Comparing `own@SVC_CD` to `own@ACT_CD` using each one's *own* level is not a
+    fair fight — coarser groups aggregate more permutations, so extreme behavior
+    averages out and calibration always looks cleaner. Holding `measure_at` fixed
+    removes that artifact: every line source is scored on the same yardstick.
+
+    Domain note: SVC_CD is where billing issues actually manifest, so it is the
+    natural `measure_at`. A line source only earns its place if it calibrates
+    well AT THAT LEVEL, regardless of how good it looks at its own granularity.
+
+    Detection is always per permutation; `measure_at` affects only how the
+    resulting false-alarm rates are aggregated for scoring.
+    """
+    target = (1 - quantile) * 100
+    out = {}
+    for system, sdf in history_df.groupby('STRATUS_TANDEM'):
+        d = _diffs(sdf).sort_values('SUBM_DATE')
+        d['_half'] = d.groupby(LABELS).cumcount() % 2
+        fit, test = d[d._half == 0].copy(), d[d._half == 1].copy()
+
+        ntest = test.groupby(measure_at).size()
+        ev = ntest[ntest >= min_test].index
+        if len(ev) < 2:
+            continue
+        scored = test[test[measure_at].isin(ev)].copy()
+        flat = fit['diff'].quantile(quantile)
+
+        def tally(lines, label):
+            """lines: a per-row Series of thresholds aligned to `scored`."""
+            hit = (scored['diff'] > lines).groupby(scored[measure_at]).mean() * 100
+            hit = hit.dropna()
+            return {'line_source': label,
+                    f'in_band%@{measure_at}': round(
+                        ((hit >= target / 2) & (hit <= target * 2)).mean() * 100),
+                    'worstFA%': round(hit.max(), 2),
+                    'deaf': int((hit == 0).sum()),
+                    f'{measure_at}_groups': len(hit)}
+
+        rows = [tally(pd.Series(flat, index=scored.index), 'flat')]
+        for src in line_sources:
+            if src == 'flat' or src not in scored.columns:
+                continue
+            own = fit.groupby(src)['diff'].quantile(quantile)
+            den = fit.groupby(src)['diff'].apply(_winsor_std).replace(0, np.nan)
+            mult = (fit['diff'] / fit[src].map(den)).quantile(quantile)
+            rows.append(tally(scored[src].map(own).fillna(flat), f'own@{src}'))
+            rows.append(tally((scored[src].map(den) * mult).fillna(flat),
+                              f'normalized@{src}'))
+
+        t = pd.DataFrame(rows)
+        out[system] = t
+        if verbose:
+            band_col = f'in_band%@{measure_at}'
+            print(f"\n=== CROSS-EVALUATION — {system} ===")
+            print(f"    every line source scored on the SAME yardstick: "
+                  f"calibration measured at {measure_at} "
+                  f"({len(ev)} groups, out-of-sample)")
+            print(f"    target false-alarm {target:.2f}%, "
+                  f"band [{target/2:.2f}%, {target*2:.2f}%]")
+            print(t.to_string(index=False))
+            best = t.loc[t[band_col].idxmax()]
+            fewest = t.loc[t['deaf'].idxmin()]
+            print(f"    best fairness at {measure_at}: {best['line_source']} "
+                  f"({best[band_col]}%) | fewest deaf: {fewest['line_source']} "
+                  f"({fewest['deaf']})")
+            base = t[t.line_source == 'flat'].iloc[0]
+            print(f"    (flat baseline: {base[band_col]}% in band, "
+                  f"{base['deaf']} deaf)")
+    return out
+
+
 def recommend(history_df, test_all=False, verbose=True):
     """
     Full two-gate recommendation.

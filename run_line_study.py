@@ -189,6 +189,12 @@ def main():
                          '(e.g. 30) to include smaller groups — noisier, but it '
                          'reveals how strategies behave on the long tail that the '
                          'default threshold excludes entirely.')
+    ap.add_argument('--measure-at', default='SVC_CD', dest='measure_at',
+                    help='level at which calibration is judged in the '
+                         'cross-evaluation (default SVC_CD — where billing '
+                         'issues manifest). Line sources are compared on this '
+                         'single yardstick so coarser groupings get no unfair '
+                         'advantage.')
     ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
     args = ap.parse_args()
 
@@ -206,7 +212,7 @@ def main():
             return
         describe(history)
 
-        from wobble_advisor import compare_strategies, recommend
+        from wobble_advisor import compare_strategies, cross_evaluate, recommend
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -220,6 +226,17 @@ def main():
                                    min_test=args.min_test)
         for system, table in strat.items():
             table.to_csv(OUT_DIR / f"strategies_{system}_{stamp}.csv", index=False)
+
+        print(f"\n{'='*72}\nPART 1b — WHICH GROUPING SHOULD SUPPLY THE LINE?\n{'='*72}")
+        print("Part 1 scored each grouping at its OWN level, which favours coarse")
+        print("groupings unfairly (bigger buckets average out extremes). Here every")
+        print(f"line source is judged on ONE yardstick: calibration at {args.measure_at}.")
+        print("Detection is always per permutation; this only sets how false-alarm")
+        print("rates are aggregated for scoring.\n")
+        cross = cross_evaluate(history, measure_at=args.measure_at,
+                               quantile=args.quantile, min_test=args.min_test)
+        for system, table in cross.items():
+            table.to_csv(OUT_DIR / f"crosseval_{system}_{stamp}.csv", index=False)
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
