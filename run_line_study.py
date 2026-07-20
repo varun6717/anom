@@ -219,9 +219,7 @@ def main():
         strat = compare_strategies(history, dim=args.dim, quantile=args.quantile,
                                    min_test=args.min_test)
         for system, table in strat.items():
-            table.to_csv(
-                OUT_DIR / f"strategies_{system}_{args.dim}_min{args.min_test}_{stamp}.csv",
-                index=False)
+            table.to_csv(OUT_DIR / f"strategies_{system}_{stamp}.csv", index=False)
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
