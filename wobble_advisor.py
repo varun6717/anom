@@ -508,6 +508,103 @@ def quantile_sweep(history_df, dim='SVC_CD',
     return out
 
 
+def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0,
+                     window=None, verbose=True):
+    """
+    Produce the calibration artifact the scoring pipeline consumes at run time.
+
+    Separates CALIBRATION (which dimension, which quantile, what the lines are —
+    decided by measurement, re-run when the data or the grouping changes) from
+    SCORING (applied daily). Changing the grouping to INTERCHANGE_LVL_CODE or
+    anything else becomes: re-run the study with --dim, review the diagnostics,
+    ship the new config. No pipeline code changes.
+
+    The config carries two things:
+
+      RECIPE (authoritative)  - group_dim, quantile, cap policy. The pipeline
+                                recomputes lines from its OWN history using these
+                                rules, so it stays self-consistent even if its
+                                window differs from the study's.
+      REFERENCE (advisory)    - the lines this study computed, plus the record
+                                counts behind each. Use to validate that the
+                                pipeline's own numbers land in the same place;
+                                a large divergence means the windows disagree.
+
+    `dim` must exist as a column. Any categorical column works — the analysis
+    never assumes SVC_CD semantics.
+    """
+    if dim not in history_df.columns:
+        raise ValueError(
+            f"grouping column {dim!r} not present. Available: "
+            f"{[c for c in history_df.columns if c not in ('SUBM_DATE','TRANSACTION_COUNT')]}"
+        )
+
+    cfg = {
+        'schema_version': 1,
+        'recipe': {
+            'group_dim': dim,
+            'quantile': quantile,
+            'cap_policy': 'min(group_own_quantile, cap_multiplier * pooled_quantile)',
+            'cap_multiplier': cap_multiplier,
+            'center_level': 'permutation',
+            'permutation_labels': LABELS,
+            'transform': 'log1p',
+            'standardize': 'one global mean/std per system, frozen from history',
+        },
+        'provenance': {
+            'history_window': window,
+            'source_rows': int(len(history_df)),
+            'distinct_days': int(history_df['SUBM_DATE'].nunique()),
+        },
+        'systems': {},
+    }
+
+    for system, sdf in history_df.groupby('STRATUS_TANDEM'):
+        d = _diffs(sdf)
+        lg = np.log1p(sdf['TRANSACTION_COUNT'])
+        sd = float(lg.std())
+        pooled = float(d['diff'].quantile(quantile))
+        cap = pooled * cap_multiplier
+        sizes = d.groupby(dim).size()
+        own = d.groupby(dim)['diff'].quantile(quantile)
+        lines = own.clip(upper=cap)
+
+        cfg['systems'][str(system)] = {
+            'log_mean': float(lg.mean()),
+            'log_std': sd,
+            'pooled_line_z': pooled,
+            'pooled_line_fold': round(float(np.exp(pooled * sd)), 2),
+            'cap_z': cap,
+            'cap_fold': round(float(np.exp(cap * sd)), 2),
+            'default_line_z': cap,      # groups absent from history fall back here
+            'n_permutations': int(d.groupby(LABELS).ngroups),
+            'lines': {
+                str(g): {
+                    'line_z': round(float(lines[g]), 6),
+                    'line_fold': round(float(np.exp(lines[g] * sd)), 2),
+                    'n_records': int(sizes[g]),
+                    'source': 'own' if own[g] <= cap else 'capped',
+                }
+                for g in lines.index
+            },
+        }
+
+    if verbose:
+        print(f"\n=== CALIBRATION CONFIG ===")
+        print(f"    recipe: group by {dim}, quantile {quantile}, "
+              f"cap at {cap_multiplier}x the pooled line")
+        for system, s in cfg['systems'].items():
+            capped = sum(1 for v in s['lines'].values() if v['source'] == 'capped')
+            folds = [v['line_fold'] for v in s['lines'].values()]
+            print(f"    {system}: {len(s['lines'])} {dim} lines "
+                  f"({capped} capped, {len(s['lines'])-capped} own)")
+            print(f"        cap = {s['cap_fold']}x | line folds: "
+                  f"min {min(folds)}x, median {float(np.median(folds))}x, "
+                  f"max {max(folds)}x")
+            print(f"        groups not in history fall back to the cap")
+    return cfg
+
+
 def recommend(history_df, test_all=False, verbose=True):
     """
     Full two-gate recommendation.

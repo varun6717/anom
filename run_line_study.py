@@ -195,6 +195,14 @@ def main():
                          'issues manifest). Line sources are compared on this '
                          'single yardstick so coarser groupings get no unfair '
                          'advantage.')
+    ap.add_argument('--emit-quantile', type=float, default=None, dest='emit_q',
+                    help='quantile to bake into the emitted calibration config. '
+                         'Pick it from the Part 1e table. Omit to skip emitting.')
+    ap.add_argument('--cap-multiplier', type=float, default=1.0, dest='cap_mult',
+                    help='cap groups at this multiple of the pooled line '
+                         '(1.0 = exactly the pooled line; higher = looser cap, '
+                         'fewer false alarms on the noisiest group but bigger '
+                         'blind spots)')
     ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
     args = ap.parse_args()
 
@@ -213,8 +221,8 @@ def main():
         describe(history)
 
         from wobble_advisor import (compare_strategies, cross_evaluate,
-                                    detectability, quantile_sweep,
-                                    recommend, volume_profile)
+                                    detectability, emit_calibration,
+                                    quantile_sweep, recommend, volume_profile)
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -271,6 +279,18 @@ def main():
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
+
+        if args.emit_q:
+            import json
+            print(f"\n{'='*72}\nCALIBRATION CONFIG\n{'='*72}")
+            print("The scoring pipeline reads this at run time. Re-running the study")
+            print("with a different --dim regenerates it; no pipeline code changes.\n")
+            cfg = emit_calibration(history, dim=args.dim, quantile=args.emit_q,
+                                   cap_multiplier=args.cap_mult,
+                                   window={'start': args.start, 'end': args.end})
+            path = OUT_DIR / f"calibration_{args.dim}_q{args.emit_q}_{stamp}.json"
+            path.write_text(json.dumps(cfg, indent=2))
+            print(f"    written to {path.name}")
 
         print(f"\n{'='*72}\nWHAT TO DO WITH THIS\n{'='*72}")
         print("1. PART 1 picks the line-setting strategy. If one strategy wins all")
