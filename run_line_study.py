@@ -184,11 +184,17 @@ def main():
     ap.add_argument('--dim', default='SVC_CD',
                     help='dimension whose line-setting we study (default SVC_CD)')
     ap.add_argument('--quantile', type=float, default=0.995)
+    ap.add_argument('--min-test', type=int, default=100, dest='min_test',
+                    help='min held-out records for a group to be scored. Lower it '
+                         '(e.g. 30) to include smaller groups — noisier, but it '
+                         'reveals how strategies behave on the long tail that the '
+                         'default threshold excludes entirely.')
     ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
     args = ap.parse_args()
 
     OUT_DIR.mkdir(exist_ok=True)
-    stamp = f"{args.start}_to_{args.end}" + ("_MOCK" if args.mock else "")
+    stamp = (f"{args.start}_to_{args.end}_{args.dim}_min{args.min_test}"
+             + ("_MOCK" if args.mock else ""))
     tee = Tee(OUT_DIR / f"line_study_{stamp}.txt")
     sys.stdout = tee
 
@@ -210,9 +216,12 @@ def main():
         print("  in_band%  fairness  - share of groups near the intended alert rate")
         print("  worstFA%  tail risk - the single worst-calibrated group")
         print("  deaf      coverage  - groups where NOTHING ever crosses (catch nothing)")
-        strat = compare_strategies(history, dim=args.dim, quantile=args.quantile)
+        strat = compare_strategies(history, dim=args.dim, quantile=args.quantile,
+                                   min_test=args.min_test)
         for system, table in strat.items():
-            table.to_csv(OUT_DIR / f"strategies_{system}_{stamp}.csv", index=False)
+            table.to_csv(
+                OUT_DIR / f"strategies_{system}_{args.dim}_min{args.min_test}_{stamp}.csv",
+                index=False)
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
