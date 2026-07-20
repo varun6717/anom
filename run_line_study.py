@@ -210,6 +210,11 @@ def main():
                     help='the smallest spike the business must never miss. The '
                          'recommender picks the loosest quantile whose WORST '
                          'group still catches a move this big (default 5x).')
+    ap.add_argument('--min-records', type=int, default=100, dest='min_records',
+                    help='a group needs this many historical records before its '
+                         'OWN threshold is trusted. Below it, the pooled line is '
+                         'used — a 3-record group otherwise gets a ~1.04x line '
+                         'and fires on any day (default 100).')
     ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
     args = ap.parse_args()
 
@@ -319,6 +324,7 @@ def main():
                 print(f"       review Parts 1b/1c before shipping it to the pipeline")
         cfg = emit_calibration(history, dim=chosen_dim, quantile=chosen_q,
                                cap_multiplier=args.cap_mult,
+                               min_records=args.min_records,
                                window={'start': args.start, 'end': args.end})
         cfg['recommendation'] = reco
         stamped = OUT_DIR / f"calibration_{chosen_dim}_q{chosen_q}_{stamp}.json"

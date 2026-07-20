@@ -649,7 +649,7 @@ def recommend_config(history_df, candidate_dims=None, measure_at='SVC_CD',
 
 
 def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0,
-                     window=None, verbose=True):
+                     min_records=100, window=None, verbose=True):
     """
     Produce the calibration artifact the scoring pipeline consumes at run time.
 
@@ -689,6 +689,9 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
             'quantile': quantile,
             'cap_policy': 'min(group_own_quantile, cap_multiplier * pooled_quantile)',
             'cap_multiplier': cap_multiplier,
+            'min_records': min_records,
+            'thin_group_policy': (f'groups with < {min_records} records use the '
+                                  f'pooled line, not their own quantile'),
             'center_level': 'permutation',
             'permutation_labels': LABELS,
             'transform': 'log1p',
@@ -713,7 +716,17 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
         else:
             sizes = d.groupby(dim).size()
             own = d.groupby(dim)['diff'].quantile(quantile)
+            # TWO guards, protecting opposite failures:
+            #   cap         - a group's own quantile can be absurdly LOOSE when its
+            #                 history happens to hold one huge day (seen: 266x).
+            #   min_records - and absurdly TIGHT when it has almost no history at
+            #                 all (seen: a 3-record group getting a 1.04x line,
+            #                 which would fire on a 4% move). Below the threshold
+            #                 we do not trust the group's own tail at all and fall
+            #                 back to the pooled line.
             lines = own.clip(upper=cap)
+            thin = sizes.index[sizes < min_records]
+            lines.loc[lines.index.intersection(thin)] = cap
 
         cfg['systems'][str(system)] = {
             'log_mean': float(lg.mean()),
@@ -729,7 +742,8 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
                     'line_z': round(float(lines[g]), 6),
                     'line_fold': round(float(np.exp(lines[g] * sd)), 2),
                     'n_records': int(sizes[g]),
-                    'source': 'own' if own[g] <= cap else 'capped',
+                    'source': ('pooled_thin' if sizes[g] < min_records
+                               else ('own' if own[g] <= cap else 'capped')),
                 }
                 for g in lines.index
             },
@@ -744,10 +758,11 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
                 print(f"    {system}: flat pooling — one line at "
                       f"{s['pooled_line_fold']}x for every permutation")
                 continue
-            capped = sum(1 for v in s['lines'].values() if v['source'] == 'capped')
+            src = pd.Series([v['source'] for v in s['lines'].values()]).value_counts()
             folds = [v['line_fold'] for v in s['lines'].values()]
             print(f"    {system}: {len(s['lines'])} {dim} lines "
-                  f"({capped} capped, {len(s['lines'])-capped} own)")
+                  f"({int(src.get('own',0))} own, {int(src.get('capped',0))} capped, "
+                  f"{int(src.get('pooled_thin',0))} pooled-thin)")
             print(f"        cap = {s['cap_fold']}x | line folds: "
                   f"min {min(folds)}x, median {float(np.median(folds))}x, "
                   f"max {max(folds)}x")
