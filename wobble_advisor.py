@@ -306,6 +306,80 @@ def cross_evaluate(history_df, measure_at='SVC_CD',
     return out
 
 
+def detectability(history_df, dim='SVC_CD', quantile=0.995, min_records=30,
+                  fold_targets=(2, 3, 5, 10, 20), verbose=True):
+    """
+    THE question that actually matters: how big must a spike be before it flags?
+
+    Everything else in this module scores FALSE ALARMS on normal days. That is
+    calibration, not detection. This translates each strategy's thresholds into
+    business units — "this code needs a 4.2x move to flag" — and reports how many
+    groups can catch a spike of a given size.
+
+    Mechanics: a diff of D in z-units corresponds to a volume fold-change of
+    exp(D * global_log_std), because the diff lives in standardised log space.
+    So a group's threshold maps directly to the smallest move it can detect.
+
+    Why this matters more than in-band%: a group can be "deaf" (never fires on
+    normal days) and still catch every spike that matters, if its threshold sits
+    at 4x. A group whose threshold sits at 60x is the real blind spot — and the
+    two look identical in the false-alarm metrics.
+
+    Lines are fitted on the full history here (not split-half): we are reporting
+    the thresholds the production pipeline would actually use, not validating
+    calibration.
+    """
+    out = {}
+    for system, sdf in history_df.groupby('STRATUS_TANDEM'):
+        d = _diffs(sdf)
+        sd = np.log1p(sdf['TRANSACTION_COUNT']).std()
+        sizes = d.groupby(dim).size()
+        keep = sizes[sizes >= min_records].index
+        if not len(keep):
+            continue
+
+        flat = d['diff'].quantile(quantile)
+        own = d.groupby(dim)['diff'].quantile(quantile)
+        den = d.groupby(dim)['diff'].apply(_winsor_std).replace(0, np.nan)
+        mult = (d['diff'] / d[dim].map(den)).quantile(quantile)
+
+        strategies = {
+            'flat': pd.Series(flat, index=keep),
+            f'own@{dim}': own.reindex(keep).fillna(flat),
+            f'normalized@{dim}': (den.reindex(keep) * mult).fillna(flat),
+        }
+
+        rows = []
+        for name, lines in strategies.items():
+            folds = np.exp(lines * sd)          # threshold -> volume multiple
+            row = {'strategy': name,
+                   'median_fold': round(float(folds.median()), 1),
+                   'p90_fold': round(float(folds.quantile(0.90)), 1),
+                   'worst_fold': round(float(folds.max()), 1)}
+            for f in fold_targets:
+                row[f'catch_{f}x%'] = round(float((folds <= f).mean() * 100))
+            rows.append(row)
+
+        t = pd.DataFrame(rows)
+        out[system] = t
+        if verbose:
+            print(f"\n=== DETECTABILITY — {system} "
+                  f"({len(keep)} {dim} groups with >={min_records} records) ===")
+            print(f"    global log-std = {sd:.3f}; a threshold of D z-units means "
+                  f"a spike of exp(D x {sd:.3f})")
+            print(f"    'catch_Nx%' = share of groups whose threshold is at or "
+                  f"below an N-fold move,")
+            print(f"    i.e. groups that WOULD flag a spike of that size.")
+            print(t.to_string(index=False))
+            best = t.loc[t[f'catch_{fold_targets[-1]}x%'].idxmax()]
+            print(f"    most groups covered at {fold_targets[-1]}x: "
+                  f"{best['strategy']} ({best[f'catch_{fold_targets[-1]}x%']}%)")
+            worst = t.loc[t['worst_fold'].idxmin()]
+            print(f"    lowest blind-spot ceiling: {worst['strategy']} "
+                  f"(worst group needs {worst['worst_fold']}x)")
+    return out
+
+
 def recommend(history_df, test_all=False, verbose=True):
     """
     Full two-gate recommendation.

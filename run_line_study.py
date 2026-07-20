@@ -212,7 +212,8 @@ def main():
             return
         describe(history)
 
-        from wobble_advisor import compare_strategies, cross_evaluate, recommend
+        from wobble_advisor import (compare_strategies, cross_evaluate,
+                                    detectability, recommend)
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -237,6 +238,17 @@ def main():
                                quantile=args.quantile, min_test=args.min_test)
         for system, table in cross.items():
             table.to_csv(OUT_DIR / f"crosseval_{system}_{stamp}.csv", index=False)
+
+        print(f"\n{'='*72}\nPART 1c — HOW BIG A SPIKE DOES EACH GROUP NEED TO FLAG?"
+              f"\n{'='*72}")
+        print("Parts 1/1b score FALSE ALARMS on normal days — that is calibration,")
+        print("not detection. This converts each strategy's thresholds into volume")
+        print("multiples, which is what actually decides whether a real spike is")
+        print("caught. A group that never fires on normal days is fine if its")
+        print("threshold sits at 4x; a group needing 60x is the real blind spot.\n")
+        det = detectability(history, dim=args.dim, quantile=args.quantile)
+        for system, table in det.items():
+            table.to_csv(OUT_DIR / f"detectability_{system}_{stamp}.csv", index=False)
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
