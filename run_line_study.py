@@ -215,6 +215,9 @@ def main():
                          'OWN threshold is trusted. Below it, the pooled line is '
                          'used — a 3-record group otherwise gets a ~1.04x line '
                          'and fires on any day (default 100).')
+    ap.add_argument('--yes', action='store_true', dest='assume_yes',
+                    help='skip the confirmation prompt and write the config '
+                         '(for scheduled/non-interactive runs)')
     ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
     args = ap.parse_args()
 
@@ -306,22 +309,49 @@ def main():
                 print(f"      python run_line_study.py --start {args.start} --end {args.end} \\")
                 print(f"             --dim {r['group_dim']} --emit-quantile {r['quantile']}")
 
-        # ---- auto-emit the calibration config from the recommendation ----
-        # No manual step: whatever Part 1f chose is what gets written. Explicit
-        # --dim / --emit-quantile override it if you want to force a choice.
+        # ---- confirm, then emit ----------------------------------------
+        # The study stops here and asks. Everything needed to decide is already
+        # on screen; answering YES writes the config and finishes the run, so a
+        # full calibration is one command plus one word.
         import json
-        print(f"\n{'='*72}\nCALIBRATION CONFIG (auto-generated)\n{'='*72}")
         first = next(iter(reco.values())) if reco else {}
         chosen_dim = args.dim_override or first.get('group_dim')
         chosen_q = args.emit_q or first.get('quantile') or args.quantile
-        src = ('overridden on the command line' if (args.dim_override or args.emit_q)
-               else 'taken from the Part 1f recommendation')
-        print(f"    group_dim = {chosen_dim}   quantile = {chosen_q}   ({src})")
-        if first.get('confidence') is not None:
-            print(f"    confidence = {first['confidence']}")
-            if first['confidence'] < 0.6 and not (args.dim_override or args.emit_q):
-                print(f"    !! LOW CONFIDENCE — the config below is still written, but")
-                print(f"       review Parts 1b/1c before shipping it to the pipeline")
+        overridden = bool(args.dim_override or args.emit_q)
+
+        print(f"\n{'='*72}\nCONFIRM CALIBRATION\n{'='*72}")
+        print(f"  proposed config")
+        print(f"     group_dim    : {chosen_dim if chosen_dim else 'None (flat pooling)'}")
+        print(f"     quantile     : {chosen_q}")
+        print(f"     cap          : {args.cap_mult}x the pooled line")
+        print(f"     min_records  : {args.min_records} (below this a group uses the pooled line)")
+        if overridden:
+            print(f"     source       : OVERRIDDEN on the command line")
+        elif first.get('confidence') is not None:
+            print(f"     confidence   : {first['confidence']}"
+                  + ("   << LOW — review Parts 1b/1c first" if first['confidence'] < 0.6 else ""))
+        if first.get('alerts_per_day') is not None:
+            print(f"     expected load: {first['alerts_per_day']} alerts/day; typical group "
+                  f"flags at {first.get('median_fold')}x, worst at {first.get('worst_fold')}x")
+        print()
+
+        if args.assume_yes:
+            answer, how = 'yes', '(--yes)'
+        else:
+            try:
+                print("  Write this calibration and finish?  [YES / no]")
+                answer, how = input("  > ").strip().lower(), ''
+            except EOFError:
+                answer, how = 'no', '(no terminal — rerun interactively or pass --yes)'
+
+        if answer not in ('y', 'yes', 'process', 'ok', 'go'):
+            print(f"\n  not written {how}")
+            print(f"  to write it later without re-running the analysis:")
+            print(f"     python {Path(__file__).name} --start {args.start} --end {args.end} \\")
+            print(f"            --force-dim {chosen_dim} --emit-quantile {chosen_q} --yes")
+            return reco
+
+        print(f"\n{'='*72}\nCALIBRATION CONFIG\n{'='*72}")
         cfg = emit_calibration(history, dim=chosen_dim, quantile=chosen_q,
                                cap_multiplier=args.cap_mult,
                                min_records=args.min_records,
