@@ -392,6 +392,65 @@ def detectability(history_df, dim='SVC_CD', quantile=0.995, min_records=30,
     return out
 
 
+def volume_profile(history_df, quantile=0.995, verbose=True):
+    """
+    Is the threshold being set by tiny permutations?
+
+    fold-change = exp(diff * global_log_std) = today / that perm's typical day.
+    The global std cancels, so a "7x threshold" literally means 99.5% of normal
+    permutation-days land within 7x of their own centre. That is a lot of routine
+    swing — and low-count permutations are the likely cause: a perm averaging 2
+    txns/day going to 14 is a 7x move and pure Poisson noise.
+
+    If so, high-volume permutations (where a 5x jump is a real incident) are being
+    judged by a threshold set by permutations doing 2/day. The fix is not a better
+    pooling strategy — it is separating permutations by volume, because relative
+    variation is inherently volume-dependent.
+
+    This reports, per volume band: how much permutations in that band naturally
+    swing, and what threshold they would need on their own.
+    """
+    out = {}
+    bands = [(0, 5), (5, 20), (20, 100), (100, 1000), (1000, np.inf)]
+    for system, sdf in history_df.groupby('STRATUS_TANDEM'):
+        d = _diffs(sdf)
+        sd = np.log1p(sdf['TRANSACTION_COUNT']).std()
+        perm_mean = d.groupby(LABELS)['TRANSACTION_COUNT'].transform('mean')
+        rows = []
+        for lo, hi in bands:
+            m = (perm_mean >= lo) & (perm_mean < hi)
+            if m.sum() < 30:
+                continue
+            sub = d.loc[m, 'diff']
+            label = f"{lo:g}-{hi:g}" if np.isfinite(hi) else f"{lo:g}+"
+            rows.append({
+                'avg_txns_per_day': label,
+                'perm_days': int(m.sum()),
+                'share_of_rows%': round(m.mean() * 100),
+                'median_swing': round(float(np.exp(sub.median() * sd)), 2),
+                'own_threshold_fold': round(float(np.exp(sub.quantile(quantile) * sd)), 1),
+            })
+        if not rows:
+            continue
+        t = pd.DataFrame(rows)
+        pooled = float(np.exp(d['diff'].quantile(quantile) * sd))
+        out[system] = t
+        if verbose:
+            print(f"\n=== VOLUME PROFILE — {system} ===")
+            print(f"    pooled threshold across ALL permutations: {pooled:.1f}x")
+            print(f"    'median_swing'       = a typical day's move vs its own centre")
+            print(f"    'own_threshold_fold' = the {quantile*100:.1f}th pct WITHIN that "
+                  f"band, i.e. the threshold")
+            print(f"                           those permutations would get on their own")
+            print(t.to_string(index=False))
+            big = t.iloc[-1]
+            print(f"    -> highest-volume band would need only "
+                  f"{big['own_threshold_fold']}x, but is judged at {pooled:.1f}x")
+            print(f"    -> if that gap is large, volume — not fee code — is the "
+                  f"dimension that matters")
+    return out
+
+
 def recommend(history_df, test_all=False, verbose=True):
     """
     Full two-gate recommendation.

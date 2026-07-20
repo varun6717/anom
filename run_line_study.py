@@ -213,7 +213,7 @@ def main():
         describe(history)
 
         from wobble_advisor import (compare_strategies, cross_evaluate,
-                                    detectability, recommend)
+                                    detectability, recommend, volume_profile)
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -247,6 +247,16 @@ def main():
         print("caught. A group that never fires on normal days is fine if its")
         print("threshold sits at 4x; a group needing 60x is the real blind spot.\n")
         det = detectability(history, dim=args.dim, quantile=args.quantile)
+
+        print(f"\n{chr(61)*72}\nPART 1d — IS VOLUME THE REAL DRIVER OF THE THRESHOLD?\n{chr(61)*72}")
+        print("fold-change = today / that perm's typical day (the global std cancels).")
+        print("So a 7x threshold means normal days routinely swing 7x — which is what")
+        print("tiny permutations do from Poisson noise alone. If high-volume perms are")
+        print("far steadier, they are being judged by a threshold set by 2-txn-a-day")
+        print("perms, and volume matters more than fee code.\n")
+        vol = volume_profile(history, quantile=args.quantile)
+        for system, table in vol.items():
+            table.to_csv(OUT_DIR / f"volume_{system}_{stamp}.csv", index=False)
         for system, table in det.items():
             table.to_csv(OUT_DIR / f"detectability_{system}_{stamp}.csv", index=False)
 
