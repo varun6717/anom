@@ -192,10 +192,24 @@ def compare_strategies(history_df, dim='SVC_CD', quantile=0.995,
         t = pd.DataFrame(rows)
         out[system] = t
         if verbose:
+            # A group can only produce false-alarm rates of k/n. If no integer k
+            # lands in the band, that group is guaranteed to score out-of-band no
+            # matter how good its threshold is — a measurement limit, not a
+            # detection failure. Surface it so the numbers aren't misread.
+            need = int(np.ceil(100 / (target * 2)))
+            n_meas = int((ntest.reindex(ev) >= need).sum())
             print(f"\n=== STRATEGY COMPARISON — {system} "
                   f"(dim={dim}, out-of-sample, {len(ev)} {dim} groups) ===")
             print(f"    target false-alarm rate {target:.2f}%, "
                   f"band [{target/2:.2f}%, {target*2:.2f}%]")
+            if n_meas < len(ev):
+                print(f"    !! only {n_meas} of {len(ev)} groups have the "
+                      f">={need} test records needed for the band to be")
+                print(f"       reachable at all. The other {len(ev)-n_meas} can "
+                      f"only score 0% (counted deaf) or >={100/ (ntest.reindex(ev).min() or 1):.1f}%")
+                print(f"       (counted noisy). Their in_band/deaf figures are "
+                      f"measurement artifacts — compare")
+                print(f"       strategies by their RELATIVE ordering, not absolute values.")
             print(t.to_string(index=False))
             best_fair = t.loc[t['in_band%'].idxmax(), 'strategy']
             best_cov = t.loc[t['deaf'].idxmin(), 'strategy']
