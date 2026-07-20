@@ -196,8 +196,11 @@ def main():
                          'single yardstick so coarser groupings get no unfair '
                          'advantage.')
     ap.add_argument('--emit-quantile', type=float, default=None, dest='emit_q',
-                    help='quantile to bake into the emitted calibration config. '
-                         'Pick it from the Part 1e table. Omit to skip emitting.')
+                    help='OVERRIDE the quantile the recommender chose. Omit to let '
+                         'the study decide (the normal path).')
+    ap.add_argument('--force-dim', default=None, dest='dim_override',
+                    help='OVERRIDE the grouping dimension the recommender chose. '
+                         'Omit to let the study decide (the normal path).')
     ap.add_argument('--cap-multiplier', type=float, default=1.0, dest='cap_mult',
                     help='cap groups at this multiple of the pooled line '
                          '(1.0 = exactly the pooled line; higher = looser cap, '
@@ -298,17 +301,32 @@ def main():
                 print(f"      python run_line_study.py --start {args.start} --end {args.end} \\")
                 print(f"             --dim {r['group_dim']} --emit-quantile {r['quantile']}")
 
-        if args.emit_q:
-            import json
-            print(f"\n{'='*72}\nCALIBRATION CONFIG\n{'='*72}")
-            print("The scoring pipeline reads this at run time. Re-running the study")
-            print("with a different --dim regenerates it; no pipeline code changes.\n")
-            cfg = emit_calibration(history, dim=args.dim, quantile=args.emit_q,
-                                   cap_multiplier=args.cap_mult,
-                                   window={'start': args.start, 'end': args.end})
-            path = OUT_DIR / f"calibration_{args.dim}_q{args.emit_q}_{stamp}.json"
-            path.write_text(json.dumps(cfg, indent=2))
-            print(f"    written to {path.name}")
+        # ---- auto-emit the calibration config from the recommendation ----
+        # No manual step: whatever Part 1f chose is what gets written. Explicit
+        # --dim / --emit-quantile override it if you want to force a choice.
+        import json
+        print(f"\n{'='*72}\nCALIBRATION CONFIG (auto-generated)\n{'='*72}")
+        first = next(iter(reco.values())) if reco else {}
+        chosen_dim = args.dim_override or first.get('group_dim')
+        chosen_q = args.emit_q or first.get('quantile') or args.quantile
+        src = ('overridden on the command line' if (args.dim_override or args.emit_q)
+               else 'taken from the Part 1f recommendation')
+        print(f"    group_dim = {chosen_dim}   quantile = {chosen_q}   ({src})")
+        if first.get('confidence') is not None:
+            print(f"    confidence = {first['confidence']}")
+            if first['confidence'] < 0.6 and not (args.dim_override or args.emit_q):
+                print(f"    !! LOW CONFIDENCE — the config below is still written, but")
+                print(f"       review Parts 1b/1c before shipping it to the pipeline")
+        cfg = emit_calibration(history, dim=chosen_dim, quantile=chosen_q,
+                               cap_multiplier=args.cap_mult,
+                               window={'start': args.start, 'end': args.end})
+        cfg['recommendation'] = reco
+        stamped = OUT_DIR / f"calibration_{chosen_dim}_q{chosen_q}_{stamp}.json"
+        latest = OUT_DIR / "calibration_latest.json"
+        stamped.write_text(json.dumps(cfg, indent=2))
+        latest.write_text(json.dumps(cfg, indent=2))
+        print(f"    written to {stamped.name}")
+        print(f"    and to    {latest.name}   <- the pipeline reads THIS path")
 
         print(f"\n{'='*72}\nWHAT TO DO WITH THIS\n{'='*72}")
         print("1. PART 1 picks the line-setting strategy. If one strategy wins all")

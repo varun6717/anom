@@ -673,7 +673,10 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
     `dim` must exist as a column. Any categorical column works — the analysis
     never assumes SVC_CD semantics.
     """
-    if dim not in history_df.columns:
+    # dim=None is a valid config: flat pooling, one line per partition. It is what
+    # the recommender returns when no grouping beats the pooled baseline.
+    flat_only = dim is None
+    if not flat_only and dim not in history_df.columns:
         raise ValueError(
             f"grouping column {dim!r} not present. Available: "
             f"{[c for c in history_df.columns if c not in ('SUBM_DATE','TRANSACTION_COUNT')]}"
@@ -682,7 +685,7 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
     cfg = {
         'schema_version': 1,
         'recipe': {
-            'group_dim': dim,
+            'group_dim': dim,   # None = flat pooling, one line per partition
             'quantile': quantile,
             'cap_policy': 'min(group_own_quantile, cap_multiplier * pooled_quantile)',
             'cap_multiplier': cap_multiplier,
@@ -705,9 +708,12 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
         sd = float(lg.std())
         pooled = float(d['diff'].quantile(quantile))
         cap = pooled * cap_multiplier
-        sizes = d.groupby(dim).size()
-        own = d.groupby(dim)['diff'].quantile(quantile)
-        lines = own.clip(upper=cap)
+        if flat_only:
+            sizes, lines = pd.Series(dtype=int), pd.Series(dtype=float)
+        else:
+            sizes = d.groupby(dim).size()
+            own = d.groupby(dim)['diff'].quantile(quantile)
+            lines = own.clip(upper=cap)
 
         cfg['systems'][str(system)] = {
             'log_mean': float(lg.mean()),
@@ -718,7 +724,7 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
             'cap_fold': round(float(np.exp(cap * sd)), 2),
             'default_line_z': cap,      # groups absent from history fall back here
             'n_permutations': int(d.groupby(LABELS).ngroups),
-            'lines': {
+            'lines': {} if flat_only else {
                 str(g): {
                     'line_z': round(float(lines[g]), 6),
                     'line_fold': round(float(np.exp(lines[g] * sd)), 2),
@@ -734,6 +740,10 @@ def emit_calibration(history_df, dim='SVC_CD', quantile=0.99, cap_multiplier=1.0
         print(f"    recipe: group by {dim}, quantile {quantile}, "
               f"cap at {cap_multiplier}x the pooled line")
         for system, s in cfg['systems'].items():
+            if flat_only:
+                print(f"    {system}: flat pooling — one line at "
+                      f"{s['pooled_line_fold']}x for every permutation")
+                continue
             capped = sum(1 for v in s['lines'].values() if v['source'] == 'capped')
             folds = [v['line_fold'] for v in s['lines'].values()]
             print(f"    {system}: {len(s['lines'])} {dim} lines "
