@@ -451,6 +451,63 @@ def volume_profile(history_df, quantile=0.995, verbose=True):
     return out
 
 
+def quantile_sweep(history_df, dim='SVC_CD',
+                   quantiles=(0.999, 0.995, 0.99, 0.98, 0.95, 0.90),
+                   verbose=True):
+    """
+    The operating point: alert volume vs detection sensitivity.
+
+    Once the line-setting strategy is fixed, the quantile is the only remaining
+    dial — and it is a business decision, not a statistical one. A lower quantile
+    means a tighter threshold: smaller spikes get caught, more alerts get raised.
+
+    Reported per quantile, using own@dim capped at the pooled line:
+      alerts_per_day    what the team would actually absorb
+      median_fold       the spike size a typical group needs
+      worst_fold        the ceiling — nothing can hide above this
+      catch_2x/3x/5x%   share of groups that would catch a spike of that size
+
+    Pick the row where alerts_per_day is tolerable and catch_Nx% covers the
+    smallest move the business needs to see. That is the operating point.
+    """
+    out = {}
+    for system, sdf in history_df.groupby('STRATUS_TANDEM'):
+        d = _diffs(sdf)
+        sd = np.log1p(sdf['TRANSACTION_COUNT']).std()
+        n_days = sdf['SUBM_DATE'].nunique()
+        sizes = d.groupby(dim).size()
+        keep = sizes[sizes >= 30].index
+
+        rows = []
+        for q in quantiles:
+            flat = d['diff'].quantile(q)
+            own = d.groupby(dim)['diff'].quantile(q).reindex(keep).fillna(flat)
+            lines = own.clip(upper=flat)
+            folds = np.exp(lines * sd)
+            per_row_line = d[dim].map(lines).fillna(flat)
+            n_flag = int((d['diff'] > per_row_line).sum())
+            rows.append({
+                'quantile': q,
+                'alerts_per_day': round(n_flag / max(n_days, 1), 1),
+                'median_fold': round(float(folds.median()), 1),
+                'worst_fold': round(float(folds.max()), 1),
+                'catch_2x%': round(float((folds <= 2).mean() * 100)),
+                'catch_3x%': round(float((folds <= 3).mean() * 100)),
+                'catch_5x%': round(float((folds <= 5).mean() * 100)),
+            })
+        t = pd.DataFrame(rows)
+        out[system] = t
+        if verbose:
+            print(f"\n=== OPERATING POINT — {system} "
+                  f"(own@{dim} capped, {len(keep)} groups, {n_days} days) ===")
+            print(f"    alerts_per_day is measured on HISTORY, so it counts normal")
+            print(f"    days crossing the line — the false-alarm load, not incidents.")
+            print(t.to_string(index=False))
+            print(f"    -> pick the row where alerts_per_day is absorbable AND")
+            print(f"       catch_Nx% covers the smallest move the business must see")
+    return out
+
+
 def recommend(history_df, test_all=False, verbose=True):
     """
     Full two-gate recommendation.

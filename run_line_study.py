@@ -213,7 +213,8 @@ def main():
         describe(history)
 
         from wobble_advisor import (compare_strategies, cross_evaluate,
-                                    detectability, recommend, volume_profile)
+                                    detectability, quantile_sweep,
+                                    recommend, volume_profile)
 
         print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
               f"\n{'='*72}")
@@ -259,6 +260,14 @@ def main():
             table.to_csv(OUT_DIR / f"volume_{system}_{stamp}.csv", index=False)
         for system, table in det.items():
             table.to_csv(OUT_DIR / f"detectability_{system}_{stamp}.csv", index=False)
+
+        print(f"\n{'='*72}\nPART 1e — WHAT OPERATING POINT DO WE WANT?\n{'='*72}")
+        print("Strategy is settled by 1b/1c; the quantile is the remaining dial, and")
+        print("it is a business call. Lower quantile = tighter threshold = smaller")
+        print("spikes caught, more alerts raised. Pick the row you can staff.\n")
+        sweep = quantile_sweep(history, dim=args.dim)
+        for system, table in sweep.items():
+            table.to_csv(OUT_DIR / f"operating_point_{system}_{stamp}.csv", index=False)
 
         print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
         rec = recommend(history, test_all=True)
