@@ -280,9 +280,12 @@ def cross_evaluate(history_df, measure_at='SVC_CD',
             own = fit.groupby(src)['diff'].quantile(quantile)
             den = fit.groupby(src)['diff'].apply(_winsor_std).replace(0, np.nan)
             mult = (fit['diff'] / fit[src].map(den)).quantile(quantile)
-            rows.append(tally(scored[src].map(own).fillna(flat), f'own@{src}'))
-            rows.append(tally((scored[src].map(den) * mult).fillna(flat),
-                              f'normalized@{src}'))
+            own_rows = scored[src].map(own).fillna(flat)
+            norm_rows = (scored[src].map(den) * mult).fillna(flat)
+            rows.append(tally(own_rows, f'own@{src}'))
+            rows.append(tally(norm_rows, f'normalized@{src}'))
+            # never looser than the pooled line — see detectability() for why
+            rows.append(tally(own_rows.clip(upper=flat), f'own@{src}_capped'))
 
         t = pd.DataFrame(rows)
         out[system] = t
@@ -343,10 +346,19 @@ def detectability(history_df, dim='SVC_CD', quantile=0.995, min_records=30,
         den = d.groupby(dim)['diff'].apply(_winsor_std).replace(0, np.nan)
         mult = (d['diff'] / d[dim].map(den)).quantile(quantile)
 
+        own_k = own.reindex(keep).fillna(flat)
+        norm_k = (den.reindex(keep) * mult).fillna(flat)
         strategies = {
             'flat': pd.Series(flat, index=keep),
-            f'own@{dim}': own.reindex(keep).fillna(flat),
-            f'normalized@{dim}': (den.reindex(keep) * mult).fillna(flat),
+            f'own@{dim}': own_k,
+            f'normalized@{dim}': norm_k,
+            # Capped variants: a group's own data may justify a TIGHTER threshold
+            # than the pooled one, but never a looser one. Removes the blind spots
+            # where a small group's history contains one huge day and its private
+            # quantile lands at an absurd multiple — while keeping the extra
+            # sensitivity wherever the group genuinely runs quieter than the pool.
+            f'own@{dim}_capped': own_k.clip(upper=flat),
+            f'normalized@{dim}_capped': norm_k.clip(upper=flat),
         }
 
         rows = []
