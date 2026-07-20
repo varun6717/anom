@@ -1,0 +1,237 @@
+# =============================================================================
+# run_line_study.py
+#
+# READ-ONLY STUDY. Pulls real fee history from Snowflake and answers one
+# question with measurements instead of assumptions:
+#
+#     Where should the anomaly threshold ("the line") come from?
+#       flat        - one system-wide line for every fee code
+#       own         - each SVC_CD's own quantile, from its own diffs
+#       tiered@N    - own line when the code has >= N records, else a robust
+#                     estimate borrowed from the pool
+#       normalized  - diffs rescaled by each code's spread, one pooled line
+#
+# Writes nothing to Snowflake. Trains no model. Touches no pipeline code.
+# Output: console tables + a timestamped .txt transcript + .csv results.
+#
+# USAGE
+#   python run_line_study.py                    # last 57 days ending yesterday
+#   python run_line_study.py --start 2026-04-20 --end 2026-06-15
+#   python run_line_study.py --dim ACT_CD       # study a different dimension
+#   python run_line_study.py --mock             # dry run on generated data
+#
+# REQUIREMENTS
+#   Snowflake access via the same externalbrowser auth anomaly_fab.py uses.
+#   A browser session is needed for login, so run this somewhere interactive.
+# =============================================================================
+import argparse
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
+import pandas as pd
+
+# NOTE: connection identifiers are placeholders. See CONNECTION_AND_QUERY.md.
+
+OUT_DIR = Path(__file__).parent / "line_study_output"
+
+# =============================================================================
+# PLACEHOLDERS — replace before running against the real warehouse.
+#
+# Everything below uses mock identifiers so this file carries no production
+# names. The real connection parameters and query live in
+# CONNECTION_AND_QUERY.md; paste them in here (or export the env vars) at
+# deploy time.
+#
+# The COLUMN names are real and must not change — the analysis depends on them:
+#   STRATUS_TANDEM, MOP_CD, SUBM_DATE, SVC_CD, GEN_TXN_STR, ACT_CD,
+#   TRANSACTION_COUNT
+# =============================================================================
+import os
+
+# vvvvvvvvvvvvvvvv  EDIT BELOW THIS LINE  vvvvvvvvvvvvvvvv
+SF_ACCOUNT = os.environ.get("SF_ACCOUNT", "MOCK_ACCOUNT")
+SF_ROLE = os.environ.get("SF_ROLE", "MOCK_ROLE")
+SF_WAREHOUSE = os.environ.get("SF_WAREHOUSE", "MOCK_WAREHOUSE")
+SF_DATABASE = os.environ.get("SF_DATABASE", "MOCK_DATABASE")
+SF_SCHEMA = os.environ.get("SF_SCHEMA", "MOCK_SCHEMA")
+SF_TABLE = os.environ.get("SF_TABLE", "MOCK_DATABASE.MOCK_SCHEMA.MOCK_FEE_TABLE")
+SF_COUNT_COL = os.environ.get("SF_COUNT_COL", "mock_fee_cnt")
+
+HISTORY_SQL = """
+SELECT
+    STRATUS_TANDEM,
+    MOP_CD,
+    TO_CHAR(SUBM_DATE, 'MM-DD-YYYY') AS SUBM_DATE,
+    SVC_CD,
+    GEN_TXN_STR,
+    ACT_CD,
+    SUM({count_col}) AS TRANSACTION_COUNT
+FROM
+    {table}
+WHERE
+    SVC_CD IS NOT NULL AND SVC_CD != 'NONE'
+    AND GEN_TXN_STR IS NOT NULL AND GEN_TXN_STR != 'NONE'
+    AND ACT_CD IS NOT NULL AND ACT_CD != 'NONE'
+    AND SUBM_DATE BETWEEN TO_TIMESTAMP('{start} 00:00:00', 'YYYY-MM-DD HH24:MI:SS')
+                      AND TO_TIMESTAMP('{end} 23:59:59', 'YYYY-MM-DD HH24:MI:SS')
+GROUP BY
+    STRATUS_TANDEM, MOP_CD, SUBM_DATE, SVC_CD, GEN_TXN_STR, ACT_CD
+"""
+# ^^^^^^^^^^^^^^^^  EDIT ABOVE THIS LINE  ^^^^^^^^^^^^^^^^
+# Nothing below needs changing. The SELECT must keep emitting these exact
+# column names — alias in the query if the source table differs:
+#   STRATUS_TANDEM, MOP_CD, SUBM_DATE, SVC_CD, GEN_TXN_STR, ACT_CD,
+#   TRANSACTION_COUNT
+# The {start} / {end} / {table} / {count_col} braces are filled at runtime.
+
+
+# -----------------------------------------------------------------------------
+# Snowflake read connection.
+#
+# DELIBERATELY duplicated from anomaly_fab.py rather than imported: that module
+# executes its whole pipeline at import time (no __main__ guard) — both queries,
+# 200 epochs of training per system, and write_to_snowflake(). Importing from it
+# would trigger a production write. Keep this standalone.
+# -----------------------------------------------------------------------------
+def execute_sql_read_only(sql_query):
+    from sqlalchemy import create_engine
+
+    if SF_ACCOUNT == "MOCK_ACCOUNT":
+        raise SystemExit(
+            "\nSnowflake identifiers are still placeholders.\n"
+            "Fill them in from CONNECTION_AND_QUERY.md — either edit the\n"
+            "SF_* constants at the top of this file, or export the env vars:\n"
+            "   export SF_ACCOUNT=...  SF_ROLE=...  SF_WAREHOUSE=...\n"
+            "   export SF_DATABASE=... SF_SCHEMA=... SF_TABLE=... SF_COUNT_COL=...\n"
+            "Or run with --mock to test the pipeline without a warehouse.\n"
+        )
+
+    user = os.environ.get("USER") or os.environ.get("USERNAME")
+    engine = create_engine(
+        f"snowflake://{user}:@{SF_ACCOUNT}/?database={SF_DATABASE}&schema={SF_SCHEMA}"
+        f"&warehouse={SF_WAREHOUSE}&role={SF_ROLE}&authenticator=externalbrowser"
+    )
+    result = pd.read_sql_query(sql_query, engine)
+    result.columns = [c.upper() for c in result.columns]
+    return result
+
+
+class Tee:
+    """Mirror stdout to a transcript file so the run is reviewable later."""
+
+    def __init__(self, path):
+        self.file = open(path, 'w')
+        self.stdout = sys.stdout
+
+    def write(self, s):
+        self.stdout.write(s)
+        self.file.write(s)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+
+def load_history(start, end, use_mock=False):
+    if use_mock:
+        print("[MOCK MODE] generating synthetic history from anomaly_dev.py")
+        import io
+        import contextlib
+        src = open(Path(__file__).parent / 'anomaly_dev.py').read()
+        ns = {'__file__': str(Path(__file__).parent / 'anomaly_dev.py')}
+        exec(src[:src.index('merchant_id_column_name =')], ns)
+        with contextlib.redirect_stdout(io.StringIO()):
+            history, _ = ns['generate_mock_data']()
+        return history
+
+    sql = HISTORY_SQL.format(start=start, end=end,
+                             table=SF_TABLE, count_col=SF_COUNT_COL)
+    print(f"querying {SF_TABLE} for {start} .. {end}")
+    print("(a browser window may open for authentication)")
+    return execute_sql_read_only(sql)
+
+
+def describe(history):
+    print(f"\n{'='*72}\nDATA PULLED\n{'='*72}")
+    print(f"  rows              : {len(history):,}")
+    print(f"  systems           : {sorted(history.STRATUS_TANDEM.unique())}")
+    print(f"  distinct days     : {history.SUBM_DATE.nunique()}")
+    for col in ['MOP_CD', 'SVC_CD', 'GEN_TXN_STR', 'ACT_CD']:
+        print(f"  {col:16s}: {history[col].nunique():,} distinct values")
+    labels = ['MOP_CD', 'SVC_CD', 'GEN_TXN_STR', 'ACT_CD']
+    for system, sdf in history.groupby('STRATUS_TANDEM'):
+        perms = sdf.groupby(labels).ngroups
+        days = sdf.groupby(labels).size()
+        print(f"\n  {system}: {len(sdf):,} rows, {perms:,} permutations")
+        print(f"     days per permutation: median {int(days.median())}, "
+              f"{(days < 10).mean()*100:.0f}% have <10 days")
+        bucket = sdf.groupby('SVC_CD').size()
+        print(f"     records per SVC_CD  : median {int(bucket.median()):,}, "
+              f"min {bucket.min():,}, max {bucket.max():,}")
+        # the sample-size question that decides whether per-code lines are viable
+        viable = (bucket >= 2000).sum()
+        print(f"     SVC codes with >=2000 records (enough for a private 99.5th "
+              f"pct): {viable} of {len(bucket)}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    default_end = date.today() - timedelta(days=1)
+    default_start = default_end - timedelta(days=56)
+    ap.add_argument('--start', default=default_start.isoformat())
+    ap.add_argument('--end', default=default_end.isoformat())
+    ap.add_argument('--dim', default='SVC_CD',
+                    help='dimension whose line-setting we study (default SVC_CD)')
+    ap.add_argument('--quantile', type=float, default=0.995)
+    ap.add_argument('--mock', action='store_true', help='dry run on synthetic data')
+    args = ap.parse_args()
+
+    OUT_DIR.mkdir(exist_ok=True)
+    stamp = f"{args.start}_to_{args.end}" + ("_MOCK" if args.mock else "")
+    tee = Tee(OUT_DIR / f"line_study_{stamp}.txt")
+    sys.stdout = tee
+
+    try:
+        print(f"LINE-SETTING STUDY   window {args.start} .. {args.end}   dim={args.dim}")
+        history = load_history(args.start, args.end, args.mock)
+        if history.empty:
+            print("\nNO ROWS RETURNED — check the date window against the source table.")
+            return
+        describe(history)
+
+        from wobble_advisor import compare_strategies, recommend
+
+        print(f"\n{'='*72}\nPART 1 — WHICH LINE-SETTING STRATEGY CALIBRATES BEST?"
+              f"\n{'='*72}")
+        print("all strategies compute diffs per PERMUTATION; they differ only in")
+        print("where the LINE comes from. evaluation is OUT-OF-SAMPLE.\n")
+        print("read the three metrics together:")
+        print("  in_band%  fairness  - share of groups near the intended alert rate")
+        print("  worstFA%  tail risk - the single worst-calibrated group")
+        print("  deaf      coverage  - groups where NOTHING ever crosses (catch nothing)")
+        strat = compare_strategies(history, dim=args.dim, quantile=args.quantile)
+        for system, table in strat.items():
+            table.to_csv(OUT_DIR / f"strategies_{system}_{stamp}.csv", index=False)
+
+        print(f"\n{'='*72}\nPART 2 — IS ANY DIMENSION WORTH NORMALIZING BY?\n{'='*72}")
+        rec = recommend(history, test_all=True)
+
+        print(f"\n{'='*72}\nWHAT TO DO WITH THIS\n{'='*72}")
+        print("1. PART 1 picks the line-setting strategy. If one strategy wins all")
+        print("   three metrics, take it. If not, weight `deaf` most heavily — a deaf")
+        print("   group has zero detection capability, which is worse than a noisy one.")
+        print("2. PART 2 sets WOBBLE_DIM / NORMALIZER. 'none' means flat pooling,")
+        print("   which is the simplest and has no contamination surface.")
+        print("3. Neither part measures whether REAL anomalies get caught — both score")
+        print("   false alarms on normal days only. The injection harness (C-6 in")
+        print("   REVIEW_OVERVIEW_FEEDBACK.md) is what settles detection power.")
+        print(f"\nresults written to {OUT_DIR}/")
+        return rec
+    finally:
+        sys.stdout = tee.stdout
+        tee.file.close()
+
+
+if __name__ == '__main__':
+    main()

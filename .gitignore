@@ -1,0 +1,15 @@
+# --- NEVER COMMIT: contain real Snowflake identifiers ---
+CONNECTION_AND_QUERY.md
+anomaly_fab.py
+
+# --- internal analysis / not for the repo ---
+REVIEW_OVERVIEW_FEEDBACK.md
+COPILOT_CONTEXT.md
+anomaly_dev.py
+
+# --- generated output ---
+dev_output/
+line_study_output/
+__pycache__/
+*.pyc
+.venv/
