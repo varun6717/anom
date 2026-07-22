@@ -223,11 +223,28 @@ def q8_weekday(h):
               + "  ".join(f"{k}:{v:+.3f}" for k, v in eff.items()))
 
 
+class _Tee:
+    """Mirror stdout to a log file so the run is saved, like run_line_study."""
+    def __init__(self, path):
+        import sys
+        self.stdout, self.file = sys.stdout, open(path, 'w')
+        sys.stdout = self
+    def write(self, s):
+        self.stdout.write(s); self.file.write(s)
+    def flush(self):
+        self.stdout.flush(); self.file.flush()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--mock', action='store_true')
     ap.add_argument('--days', type=int, default=90, help='real-pull window (default 90)')
     args = ap.parse_args()
+    out_dir = Path(__file__).parent / "line_study_output"
+    out_dir.mkdir(exist_ok=True)
+    tag = 'MOCK' if args.mock else f'{date.today().isoformat()}_days{args.days}'
+    out_path = out_dir / f"final_study_{tag}.txt"
+    _Tee(out_path)
     h, probe = load(args)
     h = h.copy()
     h['d'] = pd.to_datetime(h.SUBM_DATE, format='%m-%d-%Y')
@@ -242,7 +259,8 @@ def main():
     q7_overlap(h)
     q8_weekday(h)
     print(f"\n{'='*74}\nDONE — carry these answers into calibration recipe + input spec"
-          f"\n(toggle inventory: REVIEW_OVERVIEW_FEEDBACK.md §5c)\n{'='*74}")
+          f"\n(toggle inventory: REVIEW_OVERVIEW_FEEDBACK.md §5c)"
+          f"\nsaved to: {out_path}\n{'='*74}")
 
 
 if __name__ == '__main__':
